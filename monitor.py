@@ -870,9 +870,14 @@ def main():
         state['last_heartbeat'] = time.time()
     
     # Update state
+    # Update last_status HANYA jika alert status dikirim (ALERT/FATAL)
+    # Atau jika level berubah dari sebelumnya (untuk tracking perubahan)
+    # Ini mencegah WARNING dianggap sebagai "status baru" setiap run
+    if level in ['ALERT', 'FATAL'] or status_changed:
+        state['last_status'] = level
+    
     state['last_missed_blocks'] = metrics.get('missed_blocks', 0)
     state['last_height'] = metrics.get('height', 0)
-    state['last_status'] = level
     state['last_check'] = time.time()
     
     # Save state
