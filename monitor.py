@@ -559,18 +559,32 @@ def should_send_heartbeat(state: Dict[str, Any]) -> bool:
 
 
 def format_status_message(metrics: Dict[str, Any], status: str) -> str:
-    """Format status message for Telegram"""
-    # Status emoji
-    emoji_map = {
-        'HEALTHY': '🟢',
-        'WARNING': '🟡',
-        'ALERT': '🔴',
-        'FATAL': '⚫'
+    """Format status message for Telegram with emojis"""
+    # Status emoji and title
+    status_config = {
+        'HEALTHY': {
+            'emoji': '🟢',
+            'title': 'RAI VALIDATOR STATUS — HEALTHY',
+            'icon': '✅'
+        },
+        'WARNING': {
+            'emoji': '🟡',
+            'title': 'RAI VALIDATOR STATUS — WARNING',
+            'icon': '⚠️'
+        },
+        'ALERT': {
+            'emoji': '🔴',
+            'title': 'RAI VALIDATOR STATUS — ALERT',
+            'icon': '🚨'
+        },
+        'FATAL': {
+            'emoji': '⚫',
+            'title': 'RAI VALIDATOR STATUS — FATAL',
+            'icon': '💀'
+        }
     }
-    emoji = emoji_map.get(status, '⚪')
     
-    # Status text
-    status_text = status
+    config = status_config.get(status, {'emoji': '⚪', 'title': f'RAI VALIDATOR STATUS — {status}', 'icon': '❓'})
     
     # Validator status
     val_status = metrics.get('validator_status', 'UNKNOWN')
@@ -581,31 +595,54 @@ def format_status_message(metrics: Dict[str, Any], status: str) -> str:
     }
     val_status_display = val_status_map.get(val_status, val_status.replace('BOND_STATUS_', ''))
     
+    # Status emoji untuk validator
+    val_status_emoji = {
+        'BONDED': '🔗',
+        'UNBONDING': '⏳',
+        'UNBONDED': '🔓'
+    }.get(val_status_display, '❓')
+    
     # Format timestamp (WIB = UTC+7)
     wib_time = datetime.utcnow() + timedelta(hours=7)
     timestamp = wib_time.strftime("%Y-%m-%d %H:%M:%S WIB")
     
-    # Build message
-    message = f"{emoji} RAI VALIDATOR STATUS — {status_text}\n\n"
+    # Build message dengan emoji
+    message = f"{config['emoji']} {config['title']} {config['icon']}\n\n"
     
-    message += "Validator:\n"
-    message += f"• Status  : {val_status_display}\n"
-    message += f"• Jailed  : {'Yes' if metrics.get('jailed') else 'No'}\n"
+    message += "📊 Validator:\n"
+    message += f"• Status  : {val_status_emoji} {val_status_display}\n"
+    
+    jailed = metrics.get('jailed', False)
+    jailed_emoji = '🔒' if jailed else '🔓'
+    message += f"• Jailed  : {jailed_emoji} {'Yes' if jailed else 'No'}\n"
+    
     if metrics.get('tombstoned'):
-        message += f"• Tombstoned : Yes\n"
+        message += f"• Tombstoned : 💀 Yes\n"
     
-    message += "\nNode:\n"
+    message += "\n🖥️ Node:\n"
     sync_status = "SYNCING" if metrics.get('node_sync', True) else "OK"
-    message += f"• Sync    : {sync_status}\n"
-    message += f"• Height  : {metrics.get('height', 0):,}\n"
-    message += f"• Missed  : {metrics.get('missed_blocks', 0)}\n"
+    sync_emoji = '🔄' if metrics.get('node_sync', True) else '✅'
+    message += f"• Sync    : {sync_emoji} {sync_status}\n"
     
-    message += "\nBalance:\n"
-    message += f"• Wallet    : {format_balance(metrics.get('wallet_balance', 0))} RAI\n"
-    message += f"• Delegated : {format_balance(metrics.get('delegated_balance', 0))} RAI\n"
-    message += f"• Rewards   : {format_balance(metrics.get('rewards', 0))} RAI\n"
+    height = metrics.get('height', 0)
+    message += f"• Height  : 📈 {height:,}\n"
     
-    message += f"\n⏱ {timestamp}"
+    missed = metrics.get('missed_blocks', 0)
+    missed_emoji = '⚠️' if missed > 0 else '✅'
+    message += f"• Missed  : {missed_emoji} {missed}\n"
+    
+    message += "\n💰 Balance:\n"
+    wallet_bal = format_balance(metrics.get('wallet_balance', 0))
+    message += f"• Wallet    : 💵 {wallet_bal} RAI\n"
+    
+    delegated_bal = format_balance(metrics.get('delegated_balance', 0))
+    message += f"• Delegated : 🔐 {delegated_bal} RAI\n"
+    
+    rewards_bal = format_balance(metrics.get('rewards', 0))
+    rewards_emoji = '🎁' if float(rewards_bal) > 0 else '💤'
+    message += f"• Rewards   : {rewards_emoji} {rewards_bal} RAI\n"
+    
+    message += f"\n⏱️ {timestamp}"
     
     return message
 
