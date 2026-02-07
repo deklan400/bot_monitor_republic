@@ -1,0 +1,12 @@
+[Unit]
+Description=RAI Validator Monitor Timer
+Requires=rai-monitor.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+Persistent=true
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

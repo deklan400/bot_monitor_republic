@@ -1,0 +1,15 @@
+[Unit]
+Description=RAI Validator Monitor
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/rai-sentinel
+Environment="PATH=/opt/rai-sentinel/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/rai-sentinel/venv/bin/python /opt/rai-sentinel/monitor.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

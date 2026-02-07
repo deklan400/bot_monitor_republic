@@ -1,0 +1,17 @@
+[Unit]
+Description=RAI Sentinel Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/rai-sentinel
+Environment="PATH=/opt/rai-sentinel/venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/rai-sentinel/venv/bin/python /opt/rai-sentinel/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
