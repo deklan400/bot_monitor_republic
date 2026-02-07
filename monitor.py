@@ -224,7 +224,18 @@ def get_node_status() -> Optional[Dict[str, Any]]:
     try:
         output = republicd_query(['status'])
         if output:
-            return json.loads(output)
+            if isinstance(output, str):
+                status_data = json.loads(output)
+            else:
+                status_data = output
+            
+            # Convert to RPC format if needed
+            if isinstance(status_data, dict):
+                if 'result' not in status_data:
+                    return {'result': status_data}
+                return status_data
+    except json.JSONDecodeError:
+        pass
     except Exception:
         pass
     
