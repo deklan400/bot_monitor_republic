@@ -280,11 +280,19 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
         tombstoned = validator_data.get('tombstoned', False)
         operator_address = validator_data.get('operator_address', valoper)
         
+        # Extract moniker from description
+        description = validator_data.get('description', {})
+        if isinstance(description, dict):
+            moniker = description.get('moniker', 'Unknown')
+        else:
+            moniker = 'Unknown'
+        
         return {
             'status': mapped_status,
             'jailed': jailed,
             'tombstoned': tombstoned,
             'operator_address': operator_address,
+            'moniker': moniker,
             **validator_data
         }
     except json.JSONDecodeError as e:
@@ -473,6 +481,7 @@ def collect_metrics() -> Dict[str, Any]:
         metrics['validator_status'] = mapped_status
         metrics['jailed'] = validator.get('jailed', False)
         metrics['tombstoned'] = validator.get('tombstoned', False)
+        metrics['moniker'] = validator.get('moniker', 'Unknown')
         
         # Debug logging
         if mapped_status == 'UNKNOWN':
@@ -558,23 +567,25 @@ def should_send_heartbeat(state: Dict[str, Any]) -> bool:
 
 def format_healthy_message(metrics: Dict[str, Any]) -> str:
     """Format HEALTHY status message"""
+    moniker = metrics.get('moniker', 'Unknown')
     status = metrics.get('validator_status', 'UNKNOWN')
     height = metrics.get('height', 0)
     missed = metrics.get('missed_blocks', 0)
     
-    message = "🟢 RAI VALIDATOR STATUS — HEALTHY\n\n"
+    message = f"🟢 RAI VALIDATOR STATUS — HEALTHY\n"
+    message += f"📛 Moniker: {moniker}\n\n"
     message += "Validator:\n"
-    message += f" • Status : {status}\n"
-    message += f" • Jailed : No\n"
-    message += f" • Tombstoned : No\n\n"
+    message += f" • 🔓 Status : {status}\n"
+    message += f" • 🔒 Jailed : No\n"
+    message += f" • ⚰️  Tombstoned : No\n\n"
     message += "Node:\n"
-    message += f" • Sync   : OK\n"
-    message += f" • Height : {height:,}\n"
-    message += f" • Missed : {missed}\n\n"
+    message += f" • ✅ Sync   : OK\n"
+    message += f" • 📊 Height : {height:,}\n"
+    message += f" • ⚠️  Missed : {missed}\n\n"
     message += "Balance:\n"
-    message += f" • Wallet    : {format_balance(metrics.get('wallet_balance', 0))} RAI\n"
-    message += f" • Delegated : {format_balance(metrics.get('delegated_balance', 0))} RAI\n"
-    message += f" • Rewards   : {format_balance(metrics.get('rewards', 0))} RAI\n\n"
+    message += f" • 💰 Wallet    : {format_balance(metrics.get('wallet_balance', 0))} RAI\n"
+    message += f" • 🔐 Delegated : {format_balance(metrics.get('delegated_balance', 0))} RAI\n"
+    message += f" • 🎁 Rewards   : {format_balance(metrics.get('rewards', 0))} RAI\n\n"
     
     wib_time = datetime.utcnow() + timedelta(hours=7)
     message += f"🕒 {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
@@ -584,18 +595,21 @@ def format_healthy_message(metrics: Dict[str, Any]) -> str:
 
 def format_warning_message(metrics: Dict[str, Any]) -> str:
     """Format WARNING status message"""
+    moniker = metrics.get('moniker', 'Unknown')
     status = metrics.get('validator_status', 'UNKNOWN')
     catching_up = metrics.get('catching_up', True)
     height = metrics.get('height', 0)
     
-    message = "🟡 RAI VALIDATOR WARNING\n\n"
+    message = f"🟡 RAI VALIDATOR WARNING\n"
+    message += f"📛 Moniker: {moniker}\n\n"
     message += "Validator:\n"
-    message += f" • Status : {status}\n"
-    message += f" • Jailed : No\n\n"
+    message += f" • 🔓 Status : {status}\n"
+    message += f" • 🔒 Jailed : No\n\n"
     message += "Node:\n"
     sync_text = "Catching Up" if catching_up else "OK"
-    message += f" • Sync   : {sync_text}\n"
-    message += f" • Height : {height:,}\n\n"
+    sync_emoji = "⏳" if catching_up else "✅"
+    message += f" • {sync_emoji} Sync   : {sync_text}\n"
+    message += f" • 📊 Height : {height:,}\n\n"
     
     wib_time = datetime.utcnow() + timedelta(hours=7)
     message += f"🕒 Detected: {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
@@ -605,21 +619,24 @@ def format_warning_message(metrics: Dict[str, Any]) -> str:
 
 def format_alert_message(metrics: Dict[str, Any]) -> str:
     """Format ALERT status message"""
+    moniker = metrics.get('moniker', 'Unknown')
     status = metrics.get('validator_status', 'UNKNOWN')
     jailed = metrics.get('jailed', False)
     missed = metrics.get('missed_blocks', 0)
     
     if jailed:
-        message = "🔴 RAI VALIDATOR ALERT — JAILED\n\n"
+        message = f"🔴 RAI VALIDATOR ALERT — JAILED\n"
     else:
-        message = "🔴 RAI VALIDATOR ALERT\n\n"
+        message = f"🔴 RAI VALIDATOR ALERT\n"
     
+    message += f"📛 Moniker: {moniker}\n\n"
     message += "Validator:\n"
-    message += f" • Status : {status}\n"
-    message += f" • Jailed : {'YES' if jailed else 'No'}\n\n"
+    message += f" • 🔓 Status : {status}\n"
+    jailed_emoji = "🔴" if jailed else "🔒"
+    message += f" • {jailed_emoji} Jailed : {'YES' if jailed else 'No'}\n\n"
     message += "Node:\n"
-    message += f" • Sync   : STOPPED\n"
-    message += f" • Missed : {missed} blocks\n\n"
+    message += f" • 🛑 Sync   : STOPPED\n"
+    message += f" • ⚠️  Missed : {missed} blocks\n\n"
     
     wib_time = datetime.utcnow() + timedelta(hours=7)
     message += f"🕒 Detected: {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
@@ -629,12 +646,14 @@ def format_alert_message(metrics: Dict[str, Any]) -> str:
 
 def format_fatal_message(metrics: Dict[str, Any]) -> str:
     """Format FATAL status message"""
+    moniker = metrics.get('moniker', 'Unknown')
     status = metrics.get('validator_status', 'UNKNOWN')
     
-    message = "☠️ RAI VALIDATOR FATAL — TOMBSTONED\n\n"
+    message = f"☠️ RAI VALIDATOR FATAL — TOMBSTONED\n"
+    message += f"📛 Moniker: {moniker}\n\n"
     message += "Validator:\n"
-    message += f" • Tombstoned : YES\n"
-    message += f" • Status     : {status}\n\n"
+    message += f" • ⚰️  Tombstoned : YES\n"
+    message += f" • 🔓 Status     : {status}\n\n"
     message += "🚨 Validator permanently slashed\n"
     message += "Recovery impossible\n\n"
     
