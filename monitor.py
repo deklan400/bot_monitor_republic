@@ -838,11 +838,16 @@ def main():
     # Determine alert level
     level, should_alert = determine_alert_level(metrics, state)
     
+    # Check if status changed (untuk alert status)
+    last_status = state.get('last_status', None)
+    status_changed = (last_status is None) or (level != last_status)
+    
     # Check heartbeat (untuk full info report)
     should_heartbeat = should_send_heartbeat(state)
     
-    # Send alert/warning/fatal immediately if needed
-    if force_send or should_alert:
+    # Send alert/warning/fatal ONLY jika status berubah (atau force_send)
+    # Full info report adalah alert utama, jadi status alert hanya saat perubahan
+    if force_send or (should_alert and status_changed):
         message = format_status_message(metrics, level)
         send_telegram_message(message)
         
@@ -855,6 +860,7 @@ def main():
                 send_telegram_photo(MISSED_BLOCKS_CHART, "Missed Blocks Delta (24h)")
     
     # Send full info report every HEARTBEAT_HOURS (terlepas dari status)
+    # Ini adalah alert utama yang selalu dikirim setiap 3 jam
     if should_heartbeat:
         full_info_message = format_full_info_message(metrics)
         send_telegram_message(full_info_message)
