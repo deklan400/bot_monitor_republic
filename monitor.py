@@ -848,7 +848,8 @@ def main():
     # Send alert status HANYA untuk ALERT dan FATAL (kritikal)
     # WARNING tidak perlu alert terpisah, cukup di full info report
     # Full info report adalah alert utama setiap 3 jam
-    if force_send or (level in ['ALERT', 'FATAL'] and status_changed):
+    # Force send juga hanya untuk ALERT dan FATAL, bukan WARNING
+    if (force_send and level in ['ALERT', 'FATAL']) or (level in ['ALERT', 'FATAL'] and status_changed):
         message = format_status_message(metrics, level)
         send_telegram_message(message)
         
