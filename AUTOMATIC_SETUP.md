@@ -1,0 +1,127 @@
+# RAI Sentinel - Automatic Setup
+
+## ✅ Otomatis Jalan
+
+RAI Sentinel sudah dikonfigurasi untuk **jalan otomatis** via systemd timer.
+
+### Systemd Timer
+
+- **Service**: `rai-monitor.service`
+- **Timer**: `rai-monitor.timer`
+- **Interval**: Setiap **1 jam** (OnUnitActiveSec=1h)
+- **On Boot**: Mulai 5 menit setelah boot (OnBootSec=5min)
+- **Persistent**: True (catch up missed runs)
+
+### Heartbeat
+
+- **Interval**: Setiap **3 jam** (HEARTBEAT_HOURS=3)
+- **Format**: HEALTHY message dengan informasi lengkap
+- **Isi**: Moniker, Status, Jailed, Tombstoned, Sync, Height, Missed Blocks, Wallet, Delegated, Rewards
+
+### Cek Status
+
+```bash
+# Cek timer status
+systemctl status rai-monitor.timer
+
+# Cek service logs
+journalctl -u rai-monitor.service -f
+
+# Cek timer next run
+systemctl list-timers rai-monitor.timer
+```
+
+### Manual Trigger
+
+```bash
+# Run manual (bypass heartbeat)
+cd /opt/rai-sentinel
+source venv/bin/activate
+python monitor.py --force
+
+# Run dengan charts
+python monitor.py --force --send-charts
+```
+
+## Konfigurasi
+
+Edit `.env` untuk customize:
+
+```bash
+HEARTBEAT_HOURS=3    # Heartbeat interval (jam)
+```
+
+## Flow Otomatis
+
+```
+1. Systemd timer trigger setiap 1 jam
+   ↓
+2. Run monitor.py
+   ↓
+3. Collect metrics
+   ↓
+4. Determine alert level
+   ↓
+5. Check heartbeat interval (3 jam)
+   ↓
+6. Send message jika:
+   - Alert/Warning/Fatal → Segera
+   - Healthy + heartbeat time → Kirim HEALTHY message lengkap
+```
+
+## Informasi yang Dikirim
+
+### Setiap 3 Jam (Heartbeat - HEALTHY):
+- 📛 Moniker
+- 🔓 Status (BONDED/UNBONDING/UNBONDED)
+- 🔒 Jailed (Yes/No)
+- ⚰️ Tombstoned (Yes/No)
+- ✅ Sync Status
+- 📊 Block Height
+- ⚠️ Missed Blocks
+- 💰 Wallet Balance
+- 🔐 Delegated Balance
+- 🎁 Rewards
+
+### Segera (Alert/Warning/Fatal):
+- Alert level sesuai kondisi
+- Informasi relevan untuk alert tersebut
+
+## Troubleshooting
+
+### Timer Tidak Jalan
+
+```bash
+# Enable timer
+sudo systemctl enable rai-monitor.timer
+sudo systemctl start rai-monitor.timer
+
+# Check status
+systemctl status rai-monitor.timer
+```
+
+### Tidak Ada Message
+
+```bash
+# Check logs
+journalctl -u rai-monitor.service -n 50
+
+# Test manual
+python monitor.py --force
+
+# Check .env
+cat .env | grep TG_TOKEN
+cat .env | grep TG_CHAT_ID
+```
+
+### Ubah Interval
+
+```bash
+# Edit .env
+nano .env
+# Ubah HEARTBEAT_HOURS=3
+
+# Restart timer (optional, akan reload otomatis)
+sudo systemctl restart rai-monitor.timer
+```
+
