@@ -12,11 +12,22 @@ RAI Sentinel sudah dikonfigurasi untuk **jalan otomatis** via systemd timer.
 - **On Boot**: Mulai 5 menit setelah boot (OnBootSec=5min)
 - **Persistent**: True (catch up missed runs)
 
-### Heartbeat
+### Heartbeat (Full Info Report)
 
 - **Interval**: Setiap **3 jam** (HEARTBEAT_HOURS=3)
-- **Format**: HEALTHY message dengan informasi lengkap
-- **Isi**: Moniker, Status, Jailed, Tombstoned, Sync, Height, Missed Blocks, Wallet, Delegated, Rewards
+- **Format**: Full Status Report dengan **SEMUA informasi lengkap**
+- **Terlepas dari status**: Dikirim setiap 3 jam, baik status HEALTHY, WARNING, ALERT, atau FATAL
+- **Isi Lengkap**: 
+  - 📛 Moniker
+  - 🔓 Status (BONDED/UNBONDING/UNBONDED)
+  - 🔒/🔴 Jailed (Yes/No)
+  - ⚰️/✅ Tombstoned (Yes/No)
+  - ✅/⏳ Sync Status (OK/Catching Up)
+  - 📊 Block Height
+  - ⚠️ Missed Blocks
+  - 💰 Wallet Balance
+  - 🔐 Delegated Balance
+  - 🎁 Rewards
 
 ### Cek Status
 
@@ -64,28 +75,34 @@ HEARTBEAT_HOURS=3    # Heartbeat interval (jam)
    ↓
 5. Check heartbeat interval (3 jam)
    ↓
-6. Send message jika:
-   - Alert/Warning/Fatal → Segera
-   - Healthy + heartbeat time → Kirim HEALTHY message lengkap
+6. Send message:
+   - Alert/Warning/Fatal → Segera (status alert)
+   - Heartbeat time (setiap 3 jam) → Kirim FULL INFO REPORT (terlepas dari status)
 ```
 
 ## Informasi yang Dikirim
 
-### Setiap 3 Jam (Heartbeat - HEALTHY):
+### Setiap 3 Jam (Full Info Report):
+**Format**: `📊 RAI VALIDATOR — FULL STATUS REPORT`
+
+Berisi **SEMUA informasi lengkap**, terlepas dari status:
 - 📛 Moniker
 - 🔓 Status (BONDED/UNBONDING/UNBONDED)
-- 🔒 Jailed (Yes/No)
-- ⚰️ Tombstoned (Yes/No)
-- ✅ Sync Status
+- 🔒/🔴 Jailed (Yes/No)
+- ⚰️/✅ Tombstoned (Yes/No)
+- ✅/⏳ Sync Status (OK/Catching Up)
 - 📊 Block Height
 - ⚠️ Missed Blocks
 - 💰 Wallet Balance
 - 🔐 Delegated Balance
 - 🎁 Rewards
 
-### Segera (Alert/Warning/Fatal):
-- Alert level sesuai kondisi
+**Catatan**: Full info report dikirim setiap 3 jam, **terlepas dari status** (HEALTHY, WARNING, ALERT, atau FATAL).
+
+### Segera (Status Alert):
+- Alert level sesuai kondisi (HEALTHY/WARNING/ALERT/FATAL)
 - Informasi relevan untuk alert tersebut
+- **Tidak mengganggu** full info report setiap 3 jam
 
 ## Troubleshooting
 
