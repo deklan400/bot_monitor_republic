@@ -243,16 +243,26 @@ def get_node_status() -> Optional[Dict[str, Any]]:
 
 
 def get_validator_info() -> Optional[Dict[str, Any]]:
-    """Get validator information from LCD or republicd subprocess"""
+    """Get validator information from LCD or republicd subprocess - MUST use VALOPER address"""
+    valoper = REQUIRED_VARS.get('VALOPER_ADDRESS')
+    if not valoper:
+        log_error("VALOPER_ADDRESS not configured")
+        return None
+    
     # Try LCD first
-    endpoint = f"/cosmos/staking/v1beta1/validators/{REQUIRED_VARS['VALOPER_ADDRESS']}"
+    endpoint = f"/cosmos/staking/v1beta1/validators/{valoper}"
     result = lcd_call(endpoint)
     if result and 'validator' in result:
-        return result['validator']
+        validator = result['validator']
+        # Ensure status is mapped
+        if 'status' in validator:
+            validator['status'] = map_bond_status(validator['status'])
+        return validator
     
     # Fallback to republicd subprocess (if LCD not available)
     try:
-        output = republicd_query(['query', 'staking', 'validator', REQUIRED_VARS['VALOPER_ADDRESS'], '--output', 'json'])
+        # CRITICAL: Use VALOPER address, not wallet address
+        output = republicd_query(['query', 'staking', 'validator', valoper, '--output', 'json'])
         if output:
             if isinstance(output, str):
                 validator_data = json.loads(output)
@@ -261,8 +271,14 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
             
             # Convert republicd output format to LCD format
             if isinstance(validator_data, dict):
+                # Extract status from various possible fields
+                status = validator_data.get('status') or validator_data.get('bond_status') or 'UNKNOWN'
+                
+                # Map status to human readable
+                mapped_status = map_bond_status(status)
+                
                 return {
-                    'status': validator_data.get('status', 'UNKNOWN'),
+                    'status': mapped_status,
                     'jailed': validator_data.get('jailed', False),
                     'tombstoned': validator_data.get('tombstoned', False),
                     **validator_data
@@ -453,6 +469,37 @@ def format_balance(amount: int) -> str:
     return f"{balance:.2f}"
 
 
+def map_bond_status(status: str) -> str:
+    """Map Cosmos SDK bond status to human readable format"""
+    if not status:
+        return "UNKNOWN"
+    
+    status_map = {
+        "BOND_STATUS_BONDED": "BONDED",
+        "BOND_STATUS_UNBONDING": "UNBONDING",
+        "BOND_STATUS_UNBONDED": "UNBONDED",
+        # Handle already mapped values
+        "BONDED": "BONDED",
+        "UNBONDING": "UNBONDING",
+        "UNBONDED": "UNBONDED",
+    }
+    
+    # Try direct mapping first
+    mapped = status_map.get(status)
+    if mapped:
+        return mapped
+    
+    # Try removing BOND_STATUS_ prefix
+    if status.startswith("BOND_STATUS_"):
+        return status.replace("BOND_STATUS_", "")
+    
+    # Return as-is if already human readable, otherwise UNKNOWN
+    if status in ["BONDED", "UNBONDING", "UNBONDED"]:
+        return status
+    
+    return "UNKNOWN"
+
+
 # =============================================================================
 # MONITORING LOGIC
 # =============================================================================
@@ -485,9 +532,14 @@ def collect_metrics() -> Dict[str, Any]:
     # Get validator info
     validator = get_validator_info()
     if validator:
-        metrics['validator_status'] = validator.get('status', 'UNKNOWN')
+        raw_status = validator.get('status', 'UNKNOWN')
+        # Ensure status is mapped (double check)
+        metrics['validator_status'] = map_bond_status(raw_status)
         metrics['jailed'] = validator.get('jailed', False)
         metrics['tombstoned'] = validator.get('tombstoned', False)
+    else:
+        # If validator info not found, log warning
+        log_error("Failed to get validator info - status will be UNKNOWN")
     
     # Get signing info (missed blocks)
     signing_info = get_signing_info()
@@ -537,7 +589,9 @@ def determine_status(metrics: Dict[str, Any], state: Dict[str, Any]) -> Tuple[st
             return 'ALERT', True
     
     # WARNING: Unbonding OR catching up
-    if val_status in ['BOND_STATUS_UNBONDING', 'UNBONDING']:
+    # Use mapped status for comparison
+    mapped_status = map_bond_status(val_status)
+    if mapped_status == 'UNBONDING':
         return 'WARNING', True
     
     # Only check node_sync if we have valid data
@@ -586,14 +640,9 @@ def format_status_message(metrics: Dict[str, Any], status: str) -> str:
     
     config = status_config.get(status, {'emoji': '⚪', 'title': f'RAI VALIDATOR STATUS — {status}', 'icon': '❓'})
     
-    # Validator status
+    # Validator status - use mapping function
     val_status = metrics.get('validator_status', 'UNKNOWN')
-    val_status_map = {
-        'BOND_STATUS_BONDED': 'BONDED',
-        'BOND_STATUS_UNBONDING': 'UNBONDING',
-        'BOND_STATUS_UNBONDED': 'UNBONDED'
-    }
-    val_status_display = val_status_map.get(val_status, val_status.replace('BOND_STATUS_', ''))
+    val_status_display = map_bond_status(val_status)
     
     # Status emoji untuk validator
     val_status_emoji = {
