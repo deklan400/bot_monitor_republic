@@ -246,6 +246,7 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
     # Query validator using VALOPER address
     output = republicd_query(['query', 'staking', 'validator', valoper, '--output', 'json'])
     if not output:
+        log_error(f"republicd query returned empty for validator: {valoper}")
         return None
     
     try:
@@ -254,22 +255,38 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
         else:
             validator_data = output
         
-        if isinstance(validator_data, dict):
-            # Extract and map status
-            raw_status = validator_data.get('status', 'UNKNOWN')
-            mapped_status = map_bond_status(raw_status)
-            
-            return {
-                'status': mapped_status,
-                'jailed': validator_data.get('jailed', False),
-                'tombstoned': validator_data.get('tombstoned', False),
-                'operator_address': validator_data.get('operator_address', valoper),
-                **validator_data
-            }
+        if not isinstance(validator_data, dict):
+            log_error(f"Validator query returned non-dict: {type(validator_data)}")
+            return None
+        
+        # Extract raw status - check multiple possible keys
+        raw_status = validator_data.get('status') or validator_data.get('Status') or 'UNKNOWN'
+        
+        # Debug: log raw status before mapping
+        if raw_status == 'UNKNOWN':
+            log_error(f"WARNING: Raw status not found in validator data. Keys: {list(validator_data.keys())[:10]}")
+        
+        # Map status
+        mapped_status = map_bond_status(raw_status)
+        
+        # Debug: log if mapping failed
+        if mapped_status == 'UNKNOWN' and raw_status != 'UNKNOWN':
+            log_error(f"WARNING: Status mapping failed. Raw: '{raw_status}', Mapped: '{mapped_status}'")
+        
+        return {
+            'status': mapped_status,
+            'jailed': validator_data.get('jailed', False),
+            'tombstoned': validator_data.get('tombstoned', False),
+            'operator_address': validator_data.get('operator_address', valoper),
+            **validator_data
+        }
     except json.JSONDecodeError as e:
         log_error(f"Failed to parse validator JSON: {e}")
+        log_error(f"Raw output (first 500 chars): {str(output)[:500]}")
     except Exception as e:
         log_error(f"Failed to process validator data: {e}")
+        import traceback
+        log_error(traceback.format_exc())
     
     return None
 
@@ -439,13 +456,23 @@ def collect_metrics() -> Dict[str, Any]:
     # Validator info - CRITICAL
     validator = get_validator_info()
     if validator:
-        raw_status = validator.get('status', 'UNKNOWN')
-        # Map status (should already be mapped in get_validator_info, but double-check)
-        metrics['validator_status'] = map_bond_status(raw_status)
+        # Status should already be mapped in get_validator_info()
+        mapped_status = validator.get('status', 'UNKNOWN')
+        # Double-check mapping (defensive)
+        if mapped_status and mapped_status not in ['BONDED', 'UNBONDING', 'UNBONDED']:
+            # If somehow not mapped, try to map it
+            mapped_status = map_bond_status(mapped_status)
+        
+        metrics['validator_status'] = mapped_status
         metrics['jailed'] = validator.get('jailed', False)
         metrics['tombstoned'] = validator.get('tombstoned', False)
+        
+        # Debug logging
+        if mapped_status == 'UNKNOWN':
+            log_error(f"WARNING: Validator status is UNKNOWN. Raw validator data: {json.dumps(validator, indent=2)[:500]}")
     else:
         log_error("CRITICAL: Failed to get validator info - status will be UNKNOWN")
+        log_error(f"VALOPER configured: {REQUIRED_VARS.get('VALOPER', 'NOT SET')}")
     
     # Signing info (for missed blocks and tombstoned)
     signing_info = get_signing_info()
