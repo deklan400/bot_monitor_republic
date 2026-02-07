@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-RAI Sentinel - Validator Monitor
-Python 3.10+ required
+RAI Sentinel - Production Validator Monitor
+Cosmos SDK validator monitoring for RAI chain
 """
 
 import os
@@ -15,7 +15,6 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
 from dotenv import load_dotenv
-import tempfile
 import shutil
 
 # Load environment variables
@@ -29,37 +28,41 @@ load_dotenv()
 REQUIRED_VARS = {
     'TG_TOKEN': os.getenv('TG_TOKEN'),
     'TG_CHAT_ID': os.getenv('TG_CHAT_ID'),
-    'WALLET_ADDRESS': os.getenv('WALLET_ADDRESS'),
-    'VALOPER_ADDRESS': os.getenv('VALOPER_ADDRESS'),
-    'CONSADDR_ADDRESS': os.getenv('CONSADDR_ADDRESS'),
+    'VALOPER': os.getenv('VALOPER'),
+    'WALLET': os.getenv('WALLET'),
 }
 
-# Optional environment variables with defaults
-RPC_URL = os.getenv('RPC_URL', 'http://localhost:26657')
-LCD_URL = os.getenv('LCD_URL', 'http://localhost:1317')
+# Optional with defaults
+REPUBLIC_HOME = Path(os.getenv('REPUBLIC_HOME', '/root/.republicd'))
 CHAIN_ID = os.getenv('CHAIN_ID', '')
 DENOM = os.getenv('DENOM', 'arai')
 DECIMALS = int(os.getenv('DECIMALS', '18'))
-HEARTBEAT_HOURS = float(os.getenv('HEARTBEAT_HOURS', '3'))
-DATA_DIR = Path(os.getenv('DATA_DIR', './history'))
-REPUBLIC_HOME = Path(os.getenv('REPUBLIC_HOME', '/root/.republicd'))
+HEARTBEAT_HOURS = float(os.getenv('HEARTBEAT_HOURS', '6'))
+REWARD_DROP_PCT = float(os.getenv('REWARD_DROP_PCT', '5'))
+STUCK_MINUTES = int(os.getenv('STUCK_MINUTES', '10'))
 REPUBLICD_BINARY = os.getenv('REPUBLICD_BINARY', 'republicd')
 
-# Retry configuration
-RPC_RETRY_ATTEMPTS = 3
-RPC_RETRY_BASE_DELAY = 1  # seconds
-
 # Paths
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-STATE_FILE = DATA_DIR / 'state.json'
-HISTORY_CSV = DATA_DIR / 'history.csv'
+HISTORY_DIR = Path('history')
+HISTORY_DIR.mkdir(exist_ok=True)
+HISTORY_CSV = HISTORY_DIR / 'history.csv'
+REWARDS_CHART = HISTORY_DIR / 'rewards.png'
+MISSED_BLOCKS_CHART = HISTORY_DIR / 'missed_blocks.png'
+STATE_FILE = HISTORY_DIR / 'state.json'
+
+# RPC endpoint
+RPC_URL = os.getenv('RPC_URL', 'http://localhost:26657')
+
+# Retry config
+RPC_RETRY_ATTEMPTS = 3
+RPC_RETRY_DELAY = 2
 
 # =============================================================================
 # VALIDATION
 # =============================================================================
 
 def validate_config() -> bool:
-    """Fail-fast validation of required environment variables"""
+    """Validate all required environment variables"""
     missing = [var for var, value in REQUIRED_VARS.items() if not value]
     if missing:
         print(f"ERROR: Missing required environment variables: {', '.join(missing)}", file=sys.stderr)
@@ -80,20 +83,18 @@ def log_error(msg: str) -> None:
 def atomic_write_json(filepath: Path, data: Dict[str, Any]) -> bool:
     """Atomically write JSON file"""
     try:
-        # Write to temp file first
         temp_file = filepath.with_suffix('.tmp')
         with open(temp_file, 'w') as f:
             json.dump(data, f, indent=2)
-        # Atomic move
         shutil.move(str(temp_file), str(filepath))
         return True
     except Exception as e:
-        log_error(f"Failed to write state file: {e}")
+        log_error(f"Failed to write state: {e}")
         return False
 
 
 def load_state() -> Dict[str, Any]:
-    """Load state from JSON file"""
+    """Load state from JSON"""
     try:
         if STATE_FILE.exists():
             with open(STATE_FILE, 'r') as f:
@@ -104,28 +105,43 @@ def load_state() -> Dict[str, Any]:
 
 
 def save_state(state: Dict[str, Any]) -> None:
-    """Save state to JSON file atomically"""
+    """Save state atomically"""
     atomic_write_json(STATE_FILE, state)
+
+
+def map_bond_status(status: str) -> str:
+    """Map Cosmos SDK bond status to human readable - CRITICAL FUNCTION"""
+    if not status:
+        return "UNKNOWN"
+    
+    # Direct mapping
+    status_map = {
+        "BOND_STATUS_BONDED": "BONDED",
+        "BOND_STATUS_UNBONDING": "UNBONDING",
+        "BOND_STATUS_UNBONDED": "UNBONDED",
+    }
+    
+    mapped = status_map.get(status)
+    if mapped:
+        return mapped
+    
+    # Already mapped
+    if status in ["BONDED", "UNBONDING", "UNBONDED"]:
+        return status
+    
+    # Try removing prefix
+    if status.startswith("BOND_STATUS_"):
+        return status.replace("BOND_STATUS_", "")
+    
+    return "UNKNOWN"
 
 
 # =============================================================================
 # TELEGRAM
 # =============================================================================
 
-# Telegram rate limiting
-_last_telegram_send = 0
-_telegram_min_interval = 1  # Minimum 1 second between sends
-
 def send_telegram_message(text: str) -> bool:
-    """Send message to Telegram with rate limiting"""
-    global _last_telegram_send
-    
-    # Rate limiting: ensure minimum interval between sends
-    current_time = time.time()
-    time_since_last = current_time - _last_telegram_send
-    if time_since_last < _telegram_min_interval:
-        time.sleep(_telegram_min_interval - time_since_last)
-    
+    """Send message to Telegram"""
     try:
         url = f"https://api.telegram.org/bot{REQUIRED_VARS['TG_TOKEN']}/sendMessage"
         payload = {
@@ -134,61 +150,60 @@ def send_telegram_message(text: str) -> bool:
         }
         response = requests.post(url, json=payload, timeout=10)
         response.raise_for_status()
-        _last_telegram_send = time.time()
         return True
     except Exception as e:
-        log_error(f"Failed to send Telegram message: {e}")
+        log_error(f"Failed to send Telegram: {e}")
+        return False
+
+
+def send_telegram_photo(photo_path: Path, caption: str = "") -> bool:
+    """Send photo to Telegram"""
+    try:
+        if not photo_path.exists():
+            return False
+        url = f"https://api.telegram.org/bot{REQUIRED_VARS['TG_TOKEN']}/sendPhoto"
+        with open(photo_path, 'rb') as photo:
+            files = {'photo': photo}
+            data = {'chat_id': REQUIRED_VARS['TG_CHAT_ID'], 'caption': caption}
+            response = requests.post(url, files=files, data=data, timeout=30)
+            response.raise_for_status()
+            return True
+    except Exception as e:
+        log_error(f"Failed to send photo: {e}")
         return False
 
 
 # =============================================================================
-# RPC/LCD CALLS WITH RETRY
+# RPC CALLS
 # =============================================================================
 
-def rpc_call(endpoint: str, retry_attempts: int = RPC_RETRY_ATTEMPTS) -> Optional[Dict[str, Any]]:
-    """Make RPC call with retry and backoff"""
-    for attempt in range(retry_attempts):
+def rpc_call(endpoint: str) -> Optional[Dict[str, Any]]:
+    """Make RPC call with retry"""
+    for attempt in range(RPC_RETRY_ATTEMPTS):
         try:
             url = f"{RPC_URL}{endpoint}"
             response = requests.get(url, timeout=10)
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            if attempt < retry_attempts - 1:
-                delay = RPC_RETRY_BASE_DELAY * (2 ** attempt)
-                time.sleep(delay)
+            if attempt < RPC_RETRY_ATTEMPTS - 1:
+                time.sleep(RPC_RETRY_DELAY * (attempt + 1))
                 continue
-            log_error(f"RPC call failed {endpoint} after {retry_attempts} attempts: {e}")
-            return None
-    return None
-
-
-def lcd_call(endpoint: str, retry_attempts: int = RPC_RETRY_ATTEMPTS) -> Optional[Dict[str, Any]]:
-    """Make LCD call with retry and backoff"""
-    for attempt in range(retry_attempts):
-        try:
-            url = f"{LCD_URL}{endpoint}"
-            response = requests.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            if attempt < retry_attempts - 1:
-                delay = RPC_RETRY_BASE_DELAY * (2 ** attempt)
-                time.sleep(delay)
-                continue
-            log_error(f"LCD call failed {endpoint} after {retry_attempts} attempts: {e}")
+            log_error(f"RPC call failed {endpoint}: {e}")
             return None
     return None
 
 
 # =============================================================================
-# REPUBLICD SUBPROCESS CALLS
+# REPUBLICD QUERIES
 # =============================================================================
 
 def republicd_query(command: list) -> Optional[str]:
-    """Execute republicd query command via subprocess"""
+    """Execute republicd query command"""
     try:
         cmd = [REPUBLICD_BINARY] + command
+        if CHAIN_ID:
+            cmd.extend(['--chain-id', CHAIN_ID])
         result = subprocess.run(
             cmd,
             capture_output=True,
@@ -199,13 +214,13 @@ def republicd_query(command: list) -> Optional[str]:
         if result.returncode == 0:
             return result.stdout.strip()
         else:
-            log_error(f"republicd command failed: {' '.join(cmd)} - {result.stderr}")
+            log_error(f"republicd failed: {' '.join(cmd)} - {result.stderr}")
             return None
     except subprocess.TimeoutExpired:
-        log_error(f"republicd command timeout: {' '.join(command)}")
+        log_error(f"republicd timeout: {' '.join(command)}")
         return None
     except Exception as e:
-        log_error(f"republicd subprocess error: {e}")
+        log_error(f"republicd error: {e}")
         return None
 
 
@@ -214,290 +229,182 @@ def republicd_query(command: list) -> Optional[str]:
 # =============================================================================
 
 def get_node_status() -> Optional[Dict[str, Any]]:
-    """Get node status from RPC or republicd subprocess"""
-    # Try RPC first
+    """Get node status from RPC"""
     result = rpc_call('/status')
     if result and 'result' in result:
         return result['result']
-    
-    # Fallback to republicd subprocess
-    try:
-        output = republicd_query(['status'])
-        if output:
-            if isinstance(output, str):
-                status_data = json.loads(output)
-            else:
-                status_data = output
-            
-            # Convert to RPC format if needed
-            if isinstance(status_data, dict):
-                if 'result' not in status_data:
-                    return {'result': status_data}
-                return status_data
-    except json.JSONDecodeError:
-        pass
-    except Exception:
-        pass
-    
     return None
 
 
 def get_validator_info() -> Optional[Dict[str, Any]]:
-    """Get validator information from LCD or republicd subprocess - MUST use VALOPER address"""
-    valoper = REQUIRED_VARS.get('VALOPER_ADDRESS')
+    """Get validator info - CRITICAL: Must use VALOPER address"""
+    valoper = REQUIRED_VARS.get('VALOPER')
     if not valoper:
-        log_error("VALOPER_ADDRESS not configured")
+        log_error("VALOPER not configured")
         return None
     
-    # Try LCD first
-    endpoint = f"/cosmos/staking/v1beta1/validators/{valoper}"
-    result = lcd_call(endpoint)
-    if result and 'validator' in result:
-        validator = result['validator']
-        # Ensure status is mapped
-        if 'status' in validator:
-            validator['status'] = map_bond_status(validator['status'])
-        return validator
+    # Query validator using VALOPER address
+    output = republicd_query(['query', 'staking', 'validator', valoper, '--output', 'json'])
+    if not output:
+        return None
     
-    # Fallback to republicd subprocess (if LCD not available)
     try:
-        # CRITICAL: Use VALOPER address, not wallet address
-        output = republicd_query(['query', 'staking', 'validator', valoper, '--output', 'json'])
-        if output:
-            if isinstance(output, str):
-                validator_data = json.loads(output)
-            else:
-                validator_data = output
+        if isinstance(output, str):
+            validator_data = json.loads(output)
+        else:
+            validator_data = output
+        
+        if isinstance(validator_data, dict):
+            # Extract and map status
+            raw_status = validator_data.get('status', 'UNKNOWN')
+            mapped_status = map_bond_status(raw_status)
             
-            # Convert republicd output format to LCD format
-            if isinstance(validator_data, dict):
-                # Extract status from various possible fields
-                status = validator_data.get('status') or validator_data.get('bond_status') or 'UNKNOWN'
-                
-                # Map status to human readable
-                mapped_status = map_bond_status(status)
-                
-                return {
-                    'status': mapped_status,
-                    'jailed': validator_data.get('jailed', False),
-                    'tombstoned': validator_data.get('tombstoned', False),
-                    **validator_data
-                }
+            return {
+                'status': mapped_status,
+                'jailed': validator_data.get('jailed', False),
+                'tombstoned': validator_data.get('tombstoned', False),
+                'operator_address': validator_data.get('operator_address', valoper),
+                **validator_data
+            }
     except json.JSONDecodeError as e:
-        log_error(f"republicd validator JSON parse failed: {e}")
+        log_error(f"Failed to parse validator JSON: {e}")
     except Exception as e:
-        log_error(f"republicd query fallback failed: {e}")
+        log_error(f"Failed to process validator data: {e}")
     
     return None
 
 
 def get_signing_info() -> Optional[Dict[str, Any]]:
-    """Get validator signing info from LCD or republicd subprocess"""
-    # Try LCD first
-    endpoint = f"/cosmos/slashing/v1beta1/validators/{REQUIRED_VARS['CONSADDR_ADDRESS']}/signing_infos"
-    result = lcd_call(endpoint)
-    if result and 'val_signing_info' in result:
-        return result['val_signing_info']
+    """Get signing info for missed blocks and tombstoned status"""
+    # Get validator pubkey first
+    validator = get_validator_info()
+    if not validator:
+        return None
     
-    # Fallback to republicd subprocess
+    # Try to get consensus address from validator
+    consensus_pubkey = validator.get('consensus_pubkey', {})
+    if not consensus_pubkey:
+        return None
+    
+    # Query slashing signing-info
+    # Note: May need consensus address, try with operator address first
+    valoper = REQUIRED_VARS.get('VALOPER')
     try:
-        output = republicd_query(['query', 'slashing', 'signing-info', REQUIRED_VARS['CONSADDR_ADDRESS'], '--output', 'json'])
+        output = republicd_query(['query', 'slashing', 'signing-info', valoper, '--output', 'json'])
         if output:
             if isinstance(output, str):
-                result = json.loads(output)
-            else:
-                result = output
-            
-            if isinstance(result, dict):
-                # Convert to LCD format
-                return {
-                    'address': result.get('address', REQUIRED_VARS['CONSADDR_ADDRESS']),
-                    'start_height': result.get('start_height', '0'),
-                    'index_offset': result.get('index_offset', '0'),
-                    'jailed_until': result.get('jailed_until', '1970-01-01T00:00:00Z'),
-                    'tombstoned': result.get('tombstoned', False),
-                    'missed_blocks_counter': result.get('missed_blocks_counter', '0'),
-                    **result
-                }
+                return json.loads(output)
+            return output
     except Exception as e:
-        log_error(f"republicd signing-info query failed: {e}")
+        log_error(f"Failed to get signing info: {e}")
     
     return None
 
 
 def get_wallet_balance() -> int:
     """Get wallet balance"""
-    # Try LCD first
-    endpoint = f"/cosmos/bank/v1beta1/balances/{REQUIRED_VARS['WALLET_ADDRESS']}"
-    result = lcd_call(endpoint)
-    if result and 'balances' in result:
-        for balance in result['balances']:
-            if balance['denom'] == DENOM:
-                try:
-                    return int(balance['amount'])
-                except (ValueError, TypeError):
-                    return 0
+    wallet = REQUIRED_VARS.get('WALLET')
+    if not wallet:
+        return 0
     
-    # Fallback to republicd subprocess
+    output = republicd_query(['query', 'bank', 'balances', wallet, '--output', 'json'])
+    if not output:
+        return 0
+    
     try:
-        output = republicd_query(['query', 'bank', 'balances', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
-        if output:
+        if isinstance(output, str):
             result = json.loads(output)
-            if 'balances' in result:
-                for balance in result['balances']:
-                    if balance.get('denom') == DENOM:
-                        try:
-                            return int(balance.get('amount', '0'))
-                        except (ValueError, TypeError):
-                            return 0
+        else:
+            result = output
+        
+        if isinstance(result, dict) and 'balances' in result:
+            for balance in result['balances']:
+                if isinstance(balance, dict) and balance.get('denom') == DENOM:
+                    try:
+                        return int(balance.get('amount', '0'))
+                    except (ValueError, TypeError):
+                        return 0
     except Exception as e:
-        log_error(f"republicd balance query failed: {e}")
+        log_error(f"Failed to parse balance: {e}")
     
     return 0
 
 
 def get_delegated_balance() -> int:
     """Get delegated balance"""
-    # Try LCD first
-    endpoint = f"/cosmos/staking/v1beta1/delegations/{REQUIRED_VARS['WALLET_ADDRESS']}"
-    result = lcd_call(endpoint)
-    total = 0
-    if result and 'delegation_responses' in result:
-        for delegation in result['delegation_responses']:
-            if 'balance' in delegation and delegation['balance']['denom'] == DENOM:
-                try:
-                    total += int(delegation['balance']['amount'])
-                except (ValueError, TypeError):
-                    continue
-        if total > 0:
-            return total
+    wallet = REQUIRED_VARS.get('WALLET')
+    if not wallet:
+        return 0
     
-    # Fallback to republicd subprocess
+    output = republicd_query(['query', 'staking', 'delegations', wallet, '--output', 'json'])
+    if not output:
+        return 0
+    
     try:
-        output = republicd_query(['query', 'staking', 'delegations', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
-        if output:
-            if isinstance(output, str):
-                result = json.loads(output)
-            else:
-                result = output
-            
-            if isinstance(result, dict) and 'delegation_responses' in result:
-                for delegation in result['delegation_responses']:
-                    if isinstance(delegation, dict) and 'balance' in delegation:
-                        balance = delegation['balance']
-                        if isinstance(balance, dict) and balance.get('denom') == DENOM:
-                            try:
-                                total += int(balance.get('amount', '0'))
-                            except (ValueError, TypeError):
-                                continue
-    except json.JSONDecodeError as e:
-        log_error(f"republicd delegations JSON parse failed: {e}")
+        if isinstance(output, str):
+            result = json.loads(output)
+        else:
+            result = output
+        
+        total = 0
+        if isinstance(result, dict):
+            delegations = result.get('delegation_responses', [])
+            for delegation in delegations:
+                if isinstance(delegation, dict):
+                    balance = delegation.get('balance', {})
+                    if isinstance(balance, dict) and balance.get('denom') == DENOM:
+                        try:
+                            total += int(balance.get('amount', '0'))
+                        except (ValueError, TypeError):
+                            continue
+        return total
     except Exception as e:
-        log_error(f"republicd delegations query failed: {e}")
+        log_error(f"Failed to parse delegations: {e}")
     
-    return total
+    return 0
 
 
 def get_rewards() -> int:
     """Get pending rewards"""
-    # Try LCD first
-    endpoint = f"/cosmos/distribution/v1beta1/delegators/{REQUIRED_VARS['WALLET_ADDRESS']}/rewards"
-    result = lcd_call(endpoint)
-    total = 0
-    if result and 'total' in result:
-        for reward in result['total']:
-            if reward['denom'] == DENOM:
-                amount = reward.get('amount', '0')
-                try:
-                    if isinstance(amount, str):
-                        # Remove decimal part if present
-                        amount = amount.split('.')[0]
-                    total += int(amount)
-                except (ValueError, TypeError):
-                    continue
-        if total > 0:
-            return total
+    wallet = REQUIRED_VARS.get('WALLET')
+    if not wallet:
+        return 0
     
-    # Fallback to republicd subprocess
+    output = republicd_query(['query', 'distribution', 'rewards', wallet, '--output', 'json'])
+    if not output:
+        return 0
+    
     try:
-        output = republicd_query(['query', 'distribution', 'rewards', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
-        if output:
-            # Parse JSON output
-            if isinstance(output, str):
-                result = json.loads(output)
-            else:
-                result = output
-            
-            # Handle different response formats
-            if isinstance(result, dict):
-                if 'total' in result:
-                    for reward in result['total']:
-                        if isinstance(reward, dict) and reward.get('denom') == DENOM:
-                            amount = reward.get('amount', '0')
-                            try:
-                                if isinstance(amount, str):
-                                    amount = amount.split('.')[0]
-                                total += int(amount)
-                            except (ValueError, TypeError):
-                                continue
-                elif 'rewards' in result:
-                    # Alternative format
-                    for reward_entry in result['rewards']:
-                        if isinstance(reward_entry, dict) and 'reward' in reward_entry:
-                            for reward in reward_entry['reward']:
-                                if isinstance(reward, dict) and reward.get('denom') == DENOM:
-                                    amount = reward.get('amount', '0')
-                                    try:
-                                        if isinstance(amount, str):
-                                            amount = amount.split('.')[0]
-                                        total += int(amount)
-                                    except (ValueError, TypeError):
-                                        continue
-    except json.JSONDecodeError as e:
-        log_error(f"republicd rewards JSON parse failed: {e}")
+        if isinstance(output, str):
+            result = json.loads(output)
+        else:
+            result = output
+        
+        total = 0
+        if isinstance(result, dict):
+            rewards_list = result.get('total', [])
+            for reward in rewards_list:
+                if isinstance(reward, dict) and reward.get('denom') == DENOM:
+                    amount = reward.get('amount', '0')
+                    try:
+                        if isinstance(amount, str):
+                            amount = amount.split('.')[0]
+                        total += int(amount)
+                    except (ValueError, TypeError):
+                        continue
+        return total
     except Exception as e:
-        log_error(f"republicd rewards query failed: {e}")
+        log_error(f"Failed to parse rewards: {e}")
     
-    return total
+    return 0
 
 
 def format_balance(amount: int) -> str:
-    """Format balance to human readable"""
+    """Format balance with decimals"""
     if amount == 0:
         return "0.00"
     balance = amount / (10 ** DECIMALS)
     return f"{balance:.2f}"
-
-
-def map_bond_status(status: str) -> str:
-    """Map Cosmos SDK bond status to human readable format"""
-    if not status:
-        return "UNKNOWN"
-    
-    status_map = {
-        "BOND_STATUS_BONDED": "BONDED",
-        "BOND_STATUS_UNBONDING": "UNBONDING",
-        "BOND_STATUS_UNBONDED": "UNBONDED",
-        # Handle already mapped values
-        "BONDED": "BONDED",
-        "UNBONDING": "UNBONDING",
-        "UNBONDED": "UNBONDED",
-    }
-    
-    # Try direct mapping first
-    mapped = status_map.get(status)
-    if mapped:
-        return mapped
-    
-    # Try removing BOND_STATUS_ prefix
-    if status.startswith("BOND_STATUS_"):
-        return status.replace("BOND_STATUS_", "")
-    
-    # Return as-is if already human readable, otherwise UNKNOWN
-    if status in ["BONDED", "UNBONDING", "UNBONDED"]:
-        return status
-    
-    return "UNKNOWN"
 
 
 # =============================================================================
@@ -505,11 +412,11 @@ def map_bond_status(status: str) -> str:
 # =============================================================================
 
 def collect_metrics() -> Dict[str, Any]:
-    """Collect all monitoring metrics - always returns dict, never None"""
+    """Collect all monitoring metrics"""
     metrics = {
         'timestamp': datetime.utcnow().isoformat(),
-        'node_sync': None,
         'height': 0,
+        'catching_up': True,
         'validator_status': 'UNKNOWN',
         'jailed': False,
         'tombstoned': False,
@@ -519,29 +426,28 @@ def collect_metrics() -> Dict[str, Any]:
         'rewards': 0,
     }
     
-    # Get node status
+    # Node status
     node_status = get_node_status()
     if node_status:
         sync_info = node_status.get('sync_info', {})
-        metrics['node_sync'] = sync_info.get('catching_up', True)
+        metrics['catching_up'] = sync_info.get('catching_up', True)
         try:
             metrics['height'] = int(sync_info.get('latest_block_height', 0))
         except (ValueError, TypeError):
             metrics['height'] = 0
     
-    # Get validator info
+    # Validator info - CRITICAL
     validator = get_validator_info()
     if validator:
         raw_status = validator.get('status', 'UNKNOWN')
-        # Ensure status is mapped (double check)
+        # Map status (should already be mapped in get_validator_info, but double-check)
         metrics['validator_status'] = map_bond_status(raw_status)
         metrics['jailed'] = validator.get('jailed', False)
         metrics['tombstoned'] = validator.get('tombstoned', False)
     else:
-        # If validator info not found, log warning
-        log_error("Failed to get validator info - status will be UNKNOWN")
+        log_error("CRITICAL: Failed to get validator info - status will be UNKNOWN")
     
-    # Get signing info (missed blocks)
+    # Signing info (for missed blocks and tombstoned)
     signing_info = get_signing_info()
     if signing_info:
         try:
@@ -549,8 +455,12 @@ def collect_metrics() -> Dict[str, Any]:
             metrics['missed_blocks'] = int(missed)
         except (ValueError, TypeError):
             metrics['missed_blocks'] = 0
+        
+        # Check tombstoned from signing info if not set
+        if not metrics['tombstoned']:
+            metrics['tombstoned'] = signing_info.get('tombstoned', False)
     
-    # Get balances
+    # Balances
     metrics['wallet_balance'] = get_wallet_balance()
     metrics['delegated_balance'] = get_delegated_balance()
     metrics['rewards'] = get_rewards()
@@ -558,48 +468,44 @@ def collect_metrics() -> Dict[str, Any]:
     return metrics
 
 
-def determine_status(metrics: Dict[str, Any], state: Dict[str, Any]) -> Tuple[str, bool]:
+def determine_alert_level(metrics: Dict[str, Any], state: Dict[str, Any]) -> Tuple[str, bool]:
     """
-    Determine status level: HEALTHY, WARNING, ALERT, FATAL
-    Returns: (status_level, should_send_message)
+    Determine alert level: HEALTHY, WARNING, ALERT, FATAL
+    Returns: (level, should_send)
     """
-    # Check if RPC data is available (prevent false alerts when RPC is down)
-    node_sync = metrics.get('node_sync')
-    height = metrics.get('height', 0)
-    val_status = metrics.get('validator_status', 'UNKNOWN')
-    
-    # If critical data is missing, don't alert (RPC might be down)
-    if node_sync is None and height == 0 and val_status == 'UNKNOWN':
-        # RPC appears to be down, don't send false alerts
-        return 'HEALTHY', False
+    status = metrics.get('validator_status', 'UNKNOWN')
+    jailed = metrics.get('jailed', False)
+    tombstoned = metrics.get('tombstoned', False)
+    catching_up = metrics.get('catching_up', True)
     
     # FATAL: Tombstoned
-    if metrics.get('tombstoned', False):
+    if tombstoned:
         return 'FATAL', True
     
-    # ALERT: Jailed OR missed blocks increased
-    if metrics.get('jailed', False):
+    # ALERT: Jailed
+    if jailed:
         return 'ALERT', True
     
-    # Check missed blocks increase (only if we have valid data)
-    if height > 0:  # Only check if we have valid height
-        last_missed = state.get('last_missed_blocks', 0)
-        current_missed = metrics.get('missed_blocks', 0)
-        if current_missed > last_missed:
-            return 'ALERT', True
+    # ALERT: Missed blocks increasing
+    last_missed = state.get('last_missed_blocks', 0)
+    current_missed = metrics.get('missed_blocks', 0)
+    if current_missed > last_missed:
+        return 'ALERT', True
     
-    # WARNING: Unbonding OR catching up
-    # Use mapped status for comparison
-    mapped_status = map_bond_status(val_status)
-    if mapped_status == 'UNBONDING':
+    # WARNING: UNBONDING
+    if status == 'UNBONDING':
         return 'WARNING', True
     
-    # Only check node_sync if we have valid data
-    if node_sync is not None and node_sync:  # catching_up = True
+    # WARNING: Catching up
+    if catching_up:
         return 'WARNING', True
     
-    # HEALTHY: Everything OK
-    return 'HEALTHY', False
+    # HEALTHY: BONDED, not jailed, not catching up
+    if status == 'BONDED' and not jailed and not catching_up:
+        return 'HEALTHY', False
+    
+    # Default to WARNING if status unclear
+    return 'WARNING', True
 
 
 def should_send_heartbeat(state: Dict[str, Any]) -> bool:
@@ -612,89 +518,115 @@ def should_send_heartbeat(state: Dict[str, Any]) -> bool:
     return hours_since >= HEARTBEAT_HOURS
 
 
-def format_status_message(metrics: Dict[str, Any], status: str) -> str:
-    """Format status message for Telegram with emojis"""
-    # Status emoji and title
-    status_config = {
-        'HEALTHY': {
-            'emoji': '🟢',
-            'title': 'RAI VALIDATOR STATUS — HEALTHY',
-            'icon': '✅'
-        },
-        'WARNING': {
-            'emoji': '🟡',
-            'title': 'RAI VALIDATOR STATUS — WARNING',
-            'icon': '⚠️'
-        },
-        'ALERT': {
-            'emoji': '🔴',
-            'title': 'RAI VALIDATOR STATUS — ALERT',
-            'icon': '🚨'
-        },
-        'FATAL': {
-            'emoji': '⚫',
-            'title': 'RAI VALIDATOR STATUS — FATAL',
-            'icon': '💀'
-        }
-    }
-    
-    config = status_config.get(status, {'emoji': '⚪', 'title': f'RAI VALIDATOR STATUS — {status}', 'icon': '❓'})
-    
-    # Validator status - use mapping function
-    val_status = metrics.get('validator_status', 'UNKNOWN')
-    val_status_display = map_bond_status(val_status)
-    
-    # Status emoji untuk validator
-    val_status_emoji = {
-        'BONDED': '🔗',
-        'UNBONDING': '⏳',
-        'UNBONDED': '🔓'
-    }.get(val_status_display, '❓')
-    
-    # Format timestamp (WIB = UTC+7)
-    wib_time = datetime.utcnow() + timedelta(hours=7)
-    timestamp = wib_time.strftime("%Y-%m-%d %H:%M:%S WIB")
-    
-    # Build message dengan emoji
-    message = f"{config['emoji']} {config['title']} {config['icon']}\n\n"
-    
-    message += "📊 Validator:\n"
-    message += f"• {val_status_emoji} Status  : {val_status_display}\n"
-    
-    jailed = metrics.get('jailed', False)
-    jailed_emoji = '🔒' if jailed else '🔓'
-    message += f"• {jailed_emoji} Jailed  : {'Yes' if jailed else 'No'}\n"
-    
-    if metrics.get('tombstoned'):
-        message += f"• 💀 Tombstoned : Yes\n"
-    
-    message += "\n🖥️ Node:\n"
-    sync_status = "SYNCING" if metrics.get('node_sync', True) else "OK"
-    sync_emoji = '🔄' if metrics.get('node_sync', True) else '✅'
-    message += f"• {sync_emoji} Sync    : {sync_status}\n"
-    
+# =============================================================================
+# TELEGRAM MESSAGE FORMATTING
+# =============================================================================
+
+def format_healthy_message(metrics: Dict[str, Any]) -> str:
+    """Format HEALTHY status message"""
+    status = metrics.get('validator_status', 'UNKNOWN')
     height = metrics.get('height', 0)
-    message += f"• 📈 Height  : {height:,}\n"
-    
     missed = metrics.get('missed_blocks', 0)
-    missed_emoji = '⚠️' if missed > 0 else '✅'
-    message += f"• {missed_emoji} Missed  : {missed}\n"
     
-    message += "\n💰 Balance:\n"
-    wallet_bal = format_balance(metrics.get('wallet_balance', 0))
-    message += f"• 💵 Wallet    : {wallet_bal} RAI\n"
+    message = "🟢 RAI VALIDATOR STATUS — HEALTHY\n\n"
+    message += "Validator:\n"
+    message += f" • Status : {status}\n"
+    message += f" • Jailed : No\n"
+    message += f" • Tombstoned : No\n\n"
+    message += "Node:\n"
+    message += f" • Sync   : OK\n"
+    message += f" • Height : {height:,}\n"
+    message += f" • Missed : {missed}\n\n"
+    message += "Balance:\n"
+    message += f" • Wallet    : {format_balance(metrics.get('wallet_balance', 0))} RAI\n"
+    message += f" • Delegated : {format_balance(metrics.get('delegated_balance', 0))} RAI\n"
+    message += f" • Rewards   : {format_balance(metrics.get('rewards', 0))} RAI\n\n"
     
-    delegated_bal = format_balance(metrics.get('delegated_balance', 0))
-    message += f"• 🔐 Delegated : {delegated_bal} RAI\n"
-    
-    rewards_bal = format_balance(metrics.get('rewards', 0))
-    rewards_emoji = '🎁' if float(rewards_bal) > 0 else '💤'
-    message += f"• {rewards_emoji} Rewards   : {rewards_bal} RAI\n"
-    
-    message += f"\n⏱️ {timestamp}"
+    wib_time = datetime.utcnow() + timedelta(hours=7)
+    message += f"🕒 {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
     
     return message
 
+
+def format_warning_message(metrics: Dict[str, Any]) -> str:
+    """Format WARNING status message"""
+    status = metrics.get('validator_status', 'UNKNOWN')
+    catching_up = metrics.get('catching_up', True)
+    height = metrics.get('height', 0)
+    
+    message = "🟡 RAI VALIDATOR WARNING\n\n"
+    message += "Validator:\n"
+    message += f" • Status : {status}\n"
+    message += f" • Jailed : No\n\n"
+    message += "Node:\n"
+    sync_text = "Catching Up" if catching_up else "OK"
+    message += f" • Sync   : {sync_text}\n"
+    message += f" • Height : {height:,}\n\n"
+    
+    wib_time = datetime.utcnow() + timedelta(hours=7)
+    message += f"🕒 Detected: {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
+    
+    return message
+
+
+def format_alert_message(metrics: Dict[str, Any]) -> str:
+    """Format ALERT status message"""
+    status = metrics.get('validator_status', 'UNKNOWN')
+    jailed = metrics.get('jailed', False)
+    missed = metrics.get('missed_blocks', 0)
+    
+    if jailed:
+        message = "🔴 RAI VALIDATOR ALERT — JAILED\n\n"
+    else:
+        message = "🔴 RAI VALIDATOR ALERT\n\n"
+    
+    message += "Validator:\n"
+    message += f" • Status : {status}\n"
+    message += f" • Jailed : {'YES' if jailed else 'No'}\n\n"
+    message += "Node:\n"
+    message += f" • Sync   : STOPPED\n"
+    message += f" • Missed : {missed} blocks\n\n"
+    
+    wib_time = datetime.utcnow() + timedelta(hours=7)
+    message += f"🕒 Detected: {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
+    
+    return message
+
+
+def format_fatal_message(metrics: Dict[str, Any]) -> str:
+    """Format FATAL status message"""
+    status = metrics.get('validator_status', 'UNKNOWN')
+    
+    message = "☠️ RAI VALIDATOR FATAL — TOMBSTONED\n\n"
+    message += "Validator:\n"
+    message += f" • Tombstoned : YES\n"
+    message += f" • Status     : {status}\n\n"
+    message += "🚨 Validator permanently slashed\n"
+    message += "Recovery impossible\n\n"
+    
+    wib_time = datetime.utcnow() + timedelta(hours=7)
+    message += f"🕒 Detected: {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
+    
+    return message
+
+
+def format_status_message(metrics: Dict[str, Any], level: str) -> str:
+    """Format status message based on alert level"""
+    if level == 'HEALTHY':
+        return format_healthy_message(metrics)
+    elif level == 'WARNING':
+        return format_warning_message(metrics)
+    elif level == 'ALERT':
+        return format_alert_message(metrics)
+    elif level == 'FATAL':
+        return format_fatal_message(metrics)
+    else:
+        return format_healthy_message(metrics)
+
+
+# =============================================================================
+# HISTORY & CHARTS
+# =============================================================================
 
 def append_history(metrics: Dict[str, Any]) -> None:
     """Append metrics to history CSV"""
@@ -705,23 +637,89 @@ def append_history(metrics: Dict[str, Any]) -> None:
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow([
-                    'timestamp', 'height', 'validator_status', 'jailed', 'tombstoned',
-                    'node_sync', 'missed_blocks', 'wallet_balance', 'delegated_balance', 'rewards'
+                    'timestamp', 'height', 'catching_up', 'missed_blocks',
+                    'rewards', 'balance', 'delegated'
                 ])
             writer.writerow([
                 metrics['timestamp'],
                 metrics['height'],
-                metrics['validator_status'],
-                metrics['jailed'],
-                metrics['tombstoned'],
-                metrics['node_sync'],
+                metrics['catching_up'],
                 metrics['missed_blocks'],
+                metrics['rewards'],
                 metrics['wallet_balance'],
-                metrics['delegated_balance'],
-                metrics['rewards']
+                metrics['delegated_balance']
             ])
     except Exception as e:
         log_error(f"Failed to append history: {e}")
+
+
+def generate_charts() -> None:
+    """Generate PNG charts"""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        from datetime import datetime, timedelta
+        
+        if not HISTORY_CSV.exists():
+            return
+        
+        # Read last 24 hours
+        timestamps = []
+        rewards = []
+        missed_deltas = []
+        
+        cutoff_time = datetime.utcnow() - timedelta(hours=24)
+        last_missed = 0
+        
+        with open(HISTORY_CSV, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                try:
+                    ts = datetime.fromisoformat(row['timestamp'])
+                    if ts < cutoff_time:
+                        continue
+                    
+                    timestamps.append(ts)
+                    rewards.append(float(row['rewards']) / (10 ** DECIMALS))
+                    
+                    current_missed = int(row['missed_blocks'])
+                    missed_deltas.append(current_missed - last_missed)
+                    last_missed = current_missed
+                except Exception:
+                    continue
+        
+        if len(timestamps) < 2:
+            return
+        
+        # Rewards chart
+        plt.figure(figsize=(10, 6))
+        plt.plot(timestamps, rewards, 'b-', linewidth=2)
+        plt.title('Rewards (Last 24h)', fontsize=14, fontweight='bold')
+        plt.xlabel('Time', fontsize=12)
+        plt.ylabel('Rewards (RAI)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(REWARDS_CHART, dpi=100, bbox_inches='tight')
+        plt.close()
+        
+        # Missed blocks chart (delta)
+        plt.figure(figsize=(10, 6))
+        plt.plot(timestamps, missed_deltas, 'r-', linewidth=2)
+        plt.title('Missed Blocks Delta (Last 24h)', fontsize=14, fontweight='bold')
+        plt.xlabel('Time', fontsize=12)
+        plt.ylabel('Missed Blocks (Delta)', fontsize=12)
+        plt.grid(True, alpha=0.3)
+        plt.xticks(rotation=45)
+        plt.tight_layout()
+        plt.savefig(MISSED_BLOCKS_CHART, dpi=100, bbox_inches='tight')
+        plt.close()
+        
+    except ImportError:
+        log_error("matplotlib not available, skipping charts")
+    except Exception as e:
+        log_error(f"Failed to generate charts: {e}")
 
 
 # =============================================================================
@@ -730,44 +728,53 @@ def append_history(metrics: Dict[str, Any]) -> None:
 
 def main():
     """Main monitoring function"""
-    # Check for --force flag
-    force_mode = '--force' in sys.argv
-    
-    # Fail-fast validation
+    # Validate config
     if not validate_config():
         sys.exit(1)
+    
+    # Check for flags
+    send_charts = '--send-charts' in sys.argv
+    force_send = '--force' in sys.argv
     
     # Load state
     state = load_state()
     
-    # Collect metrics (never crash on errors, always returns dict)
+    # Collect metrics
     metrics = collect_metrics()
     
-    # Determine status
-    status, should_alert = determine_status(metrics, state)
+    # Determine alert level
+    level, should_alert = determine_alert_level(metrics, state)
     
     # Check heartbeat
     should_heartbeat = should_send_heartbeat(state)
     
-    # Send message if needed (force mode always sends)
-    if force_mode or should_alert or (status == 'HEALTHY' and should_heartbeat):
-        message = format_status_message(metrics, status)
+    # Send message if needed
+    if force_send or should_alert or (level == 'HEALTHY' and should_heartbeat):
+        message = format_status_message(metrics, level)
         send_telegram_message(message)
         
-        # Update heartbeat time if sent (unless forced)
-        if not force_mode and status == 'HEALTHY' and should_heartbeat:
+        # Update heartbeat time
+        if level == 'HEALTHY' and should_heartbeat:
             state['last_heartbeat'] = time.time()
+        
+        # Send charts if requested or alert/fatal
+        if send_charts or level in ['ALERT', 'FATAL']:
+            generate_charts()
+            if REWARDS_CHART.exists():
+                send_telegram_photo(REWARDS_CHART, "Rewards History (24h)")
+            if MISSED_BLOCKS_CHART.exists():
+                send_telegram_photo(MISSED_BLOCKS_CHART, "Missed Blocks Delta (24h)")
     
     # Update state
     state['last_missed_blocks'] = metrics.get('missed_blocks', 0)
     state['last_height'] = metrics.get('height', 0)
-    state['last_status'] = status
+    state['last_status'] = level
     state['last_check'] = time.time()
     
-    # Save state atomically
+    # Save state
     save_state(state)
     
-    # Append to history
+    # Append history
     append_history(metrics)
 
 
