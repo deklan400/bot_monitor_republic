@@ -239,13 +239,21 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
     if result and 'validator' in result:
         return result['validator']
     
-    # Fallback to republicd subprocess
+    # Fallback to republicd subprocess (if LCD not available)
     try:
         output = republicd_query(['query', 'staking', 'validator', REQUIRED_VARS['VALOPER_ADDRESS'], '--output', 'json'])
         if output:
-            return json.loads(output)
-    except Exception:
-        pass
+            validator_data = json.loads(output)
+            # Convert republicd output format to LCD format
+            if validator_data:
+                return {
+                    'status': validator_data.get('status', 'UNKNOWN'),
+                    'jailed': validator_data.get('jailed', False),
+                    'tombstoned': validator_data.get('tombstoned', False),
+                    **validator_data
+                }
+    except Exception as e:
+        log_error(f"republicd query fallback failed: {e}")
     
     return None
 
@@ -261,6 +269,7 @@ def get_signing_info() -> Optional[Dict[str, Any]]:
 
 def get_wallet_balance() -> int:
     """Get wallet balance"""
+    # Try LCD first
     endpoint = f"/cosmos/bank/v1beta1/balances/{REQUIRED_VARS['WALLET_ADDRESS']}"
     result = lcd_call(endpoint)
     if result and 'balances' in result:
@@ -270,11 +279,28 @@ def get_wallet_balance() -> int:
                     return int(balance['amount'])
                 except (ValueError, TypeError):
                     return 0
+    
+    # Fallback to republicd subprocess
+    try:
+        output = republicd_query(['query', 'bank', 'balances', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
+        if output:
+            result = json.loads(output)
+            if 'balances' in result:
+                for balance in result['balances']:
+                    if balance.get('denom') == DENOM:
+                        try:
+                            return int(balance.get('amount', '0'))
+                        except (ValueError, TypeError):
+                            return 0
+    except Exception as e:
+        log_error(f"republicd balance query failed: {e}")
+    
     return 0
 
 
 def get_delegated_balance() -> int:
     """Get delegated balance"""
+    # Try LCD first
     endpoint = f"/cosmos/staking/v1beta1/delegations/{REQUIRED_VARS['WALLET_ADDRESS']}"
     result = lcd_call(endpoint)
     total = 0
@@ -285,11 +311,30 @@ def get_delegated_balance() -> int:
                     total += int(delegation['balance']['amount'])
                 except (ValueError, TypeError):
                     continue
+        if total > 0:
+            return total
+    
+    # Fallback to republicd subprocess
+    try:
+        output = republicd_query(['query', 'staking', 'delegations', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
+        if output:
+            result = json.loads(output)
+            if 'delegation_responses' in result:
+                for delegation in result['delegation_responses']:
+                    if 'balance' in delegation and delegation['balance'].get('denom') == DENOM:
+                        try:
+                            total += int(delegation['balance'].get('amount', '0'))
+                        except (ValueError, TypeError):
+                            continue
+    except Exception as e:
+        log_error(f"republicd delegations query failed: {e}")
+    
     return total
 
 
 def get_rewards() -> int:
     """Get pending rewards"""
+    # Try LCD first
     endpoint = f"/cosmos/distribution/v1beta1/delegators/{REQUIRED_VARS['WALLET_ADDRESS']}/rewards"
     result = lcd_call(endpoint)
     total = 0
@@ -304,6 +349,27 @@ def get_rewards() -> int:
                     total += int(amount)
                 except (ValueError, TypeError):
                     continue
+        if total > 0:
+            return total
+    
+    # Fallback to republicd subprocess
+    try:
+        output = republicd_query(['query', 'distribution', 'rewards', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
+        if output:
+            result = json.loads(output)
+            if 'total' in result:
+                for reward in result['total']:
+                    if reward.get('denom') == DENOM:
+                        amount = reward.get('amount', '0')
+                        try:
+                            if isinstance(amount, str):
+                                amount = amount.split('.')[0]
+                            total += int(amount)
+                        except (ValueError, TypeError):
+                            continue
+    except Exception as e:
+        log_error(f"republicd rewards query failed: {e}")
+    
     return total
 
 
