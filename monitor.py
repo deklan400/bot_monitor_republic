@@ -251,33 +251,40 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
     
     try:
         if isinstance(output, str):
-            validator_data = json.loads(output)
+            response_data = json.loads(output)
         else:
-            validator_data = output
+            response_data = output
+        
+        if not isinstance(response_data, dict):
+            log_error(f"Validator query returned non-dict: {type(response_data)}")
+            return None
+        
+        # Handle nested structure: response may be {"validator": {...}} or direct validator object
+        if 'validator' in response_data:
+            validator_data = response_data['validator']
+        else:
+            validator_data = response_data
         
         if not isinstance(validator_data, dict):
-            log_error(f"Validator query returned non-dict: {type(validator_data)}")
+            log_error(f"Validator data is not a dict: {type(validator_data)}")
             return None
         
         # Extract raw status - check multiple possible keys
         raw_status = validator_data.get('status') or validator_data.get('Status') or 'UNKNOWN'
         
-        # Debug: log raw status before mapping
-        if raw_status == 'UNKNOWN':
-            log_error(f"WARNING: Raw status not found in validator data. Keys: {list(validator_data.keys())[:10]}")
-        
         # Map status
         mapped_status = map_bond_status(raw_status)
         
-        # Debug: log if mapping failed
-        if mapped_status == 'UNKNOWN' and raw_status != 'UNKNOWN':
-            log_error(f"WARNING: Status mapping failed. Raw: '{raw_status}', Mapped: '{mapped_status}'")
+        # Extract other fields
+        jailed = validator_data.get('jailed', False)
+        tombstoned = validator_data.get('tombstoned', False)
+        operator_address = validator_data.get('operator_address', valoper)
         
         return {
             'status': mapped_status,
-            'jailed': validator_data.get('jailed', False),
-            'tombstoned': validator_data.get('tombstoned', False),
-            'operator_address': validator_data.get('operator_address', valoper),
+            'jailed': jailed,
+            'tombstoned': tombstoned,
+            'operator_address': operator_address,
             **validator_data
         }
     except json.JSONDecodeError as e:
