@@ -456,6 +456,7 @@ def collect_metrics() -> Dict[str, Any]:
         'wallet_balance': 0,
         'delegated_balance': 0,
         'rewards': 0,
+        'moniker': 'Unknown',
     }
     
     # Node status
