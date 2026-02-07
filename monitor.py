@@ -243,15 +243,21 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
     try:
         output = republicd_query(['query', 'staking', 'validator', REQUIRED_VARS['VALOPER_ADDRESS'], '--output', 'json'])
         if output:
-            validator_data = json.loads(output)
+            if isinstance(output, str):
+                validator_data = json.loads(output)
+            else:
+                validator_data = output
+            
             # Convert republicd output format to LCD format
-            if validator_data:
+            if isinstance(validator_data, dict):
                 return {
                     'status': validator_data.get('status', 'UNKNOWN'),
                     'jailed': validator_data.get('jailed', False),
                     'tombstoned': validator_data.get('tombstoned', False),
                     **validator_data
                 }
+    except json.JSONDecodeError as e:
+        log_error(f"republicd validator JSON parse failed: {e}")
     except Exception as e:
         log_error(f"republicd query fallback failed: {e}")
     
