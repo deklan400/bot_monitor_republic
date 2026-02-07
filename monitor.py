@@ -259,11 +259,36 @@ def get_validator_info() -> Optional[Dict[str, Any]]:
 
 
 def get_signing_info() -> Optional[Dict[str, Any]]:
-    """Get validator signing info from LCD"""
+    """Get validator signing info from LCD or republicd subprocess"""
+    # Try LCD first
     endpoint = f"/cosmos/slashing/v1beta1/validators/{REQUIRED_VARS['CONSADDR_ADDRESS']}/signing_infos"
     result = lcd_call(endpoint)
     if result and 'val_signing_info' in result:
         return result['val_signing_info']
+    
+    # Fallback to republicd subprocess
+    try:
+        output = republicd_query(['query', 'slashing', 'signing-info', REQUIRED_VARS['CONSADDR_ADDRESS'], '--output', 'json'])
+        if output:
+            if isinstance(output, str):
+                result = json.loads(output)
+            else:
+                result = output
+            
+            if isinstance(result, dict):
+                # Convert to LCD format
+                return {
+                    'address': result.get('address', REQUIRED_VARS['CONSADDR_ADDRESS']),
+                    'start_height': result.get('start_height', '0'),
+                    'index_offset': result.get('index_offset', '0'),
+                    'jailed_until': result.get('jailed_until', '1970-01-01T00:00:00Z'),
+                    'tombstoned': result.get('tombstoned', False),
+                    'missed_blocks_counter': result.get('missed_blocks_counter', '0'),
+                    **result
+                }
+    except Exception as e:
+        log_error(f"republicd signing-info query failed: {e}")
+    
     return None
 
 
@@ -318,14 +343,22 @@ def get_delegated_balance() -> int:
     try:
         output = republicd_query(['query', 'staking', 'delegations', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
         if output:
-            result = json.loads(output)
-            if 'delegation_responses' in result:
+            if isinstance(output, str):
+                result = json.loads(output)
+            else:
+                result = output
+            
+            if isinstance(result, dict) and 'delegation_responses' in result:
                 for delegation in result['delegation_responses']:
-                    if 'balance' in delegation and delegation['balance'].get('denom') == DENOM:
-                        try:
-                            total += int(delegation['balance'].get('amount', '0'))
-                        except (ValueError, TypeError):
-                            continue
+                    if isinstance(delegation, dict) and 'balance' in delegation:
+                        balance = delegation['balance']
+                        if isinstance(balance, dict) and balance.get('denom') == DENOM:
+                            try:
+                                total += int(balance.get('amount', '0'))
+                            except (ValueError, TypeError):
+                                continue
+    except json.JSONDecodeError as e:
+        log_error(f"republicd delegations JSON parse failed: {e}")
     except Exception as e:
         log_error(f"republicd delegations query failed: {e}")
     
@@ -356,17 +389,39 @@ def get_rewards() -> int:
     try:
         output = republicd_query(['query', 'distribution', 'rewards', REQUIRED_VARS['WALLET_ADDRESS'], '--output', 'json'])
         if output:
-            result = json.loads(output)
-            if 'total' in result:
-                for reward in result['total']:
-                    if reward.get('denom') == DENOM:
-                        amount = reward.get('amount', '0')
-                        try:
-                            if isinstance(amount, str):
-                                amount = amount.split('.')[0]
-                            total += int(amount)
-                        except (ValueError, TypeError):
-                            continue
+            # Parse JSON output
+            if isinstance(output, str):
+                result = json.loads(output)
+            else:
+                result = output
+            
+            # Handle different response formats
+            if isinstance(result, dict):
+                if 'total' in result:
+                    for reward in result['total']:
+                        if isinstance(reward, dict) and reward.get('denom') == DENOM:
+                            amount = reward.get('amount', '0')
+                            try:
+                                if isinstance(amount, str):
+                                    amount = amount.split('.')[0]
+                                total += int(amount)
+                            except (ValueError, TypeError):
+                                continue
+                elif 'rewards' in result:
+                    # Alternative format
+                    for reward_entry in result['rewards']:
+                        if isinstance(reward_entry, dict) and 'reward' in reward_entry:
+                            for reward in reward_entry['reward']:
+                                if isinstance(reward, dict) and reward.get('denom') == DENOM:
+                                    amount = reward.get('amount', '0')
+                                    try:
+                                        if isinstance(amount, str):
+                                            amount = amount.split('.')[0]
+                                        total += int(amount)
+                                    except (ValueError, TypeError):
+                                        continue
+    except json.JSONDecodeError as e:
+        log_error(f"republicd rewards JSON parse failed: {e}")
     except Exception as e:
         log_error(f"republicd rewards query failed: {e}")
     
