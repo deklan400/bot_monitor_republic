@@ -645,6 +645,45 @@ def format_alert_message(metrics: Dict[str, Any]) -> str:
     return message
 
 
+def format_full_info_message(metrics: Dict[str, Any]) -> str:
+    """Format FULL INFO message - semua informasi lengkap"""
+    moniker = metrics.get('moniker', 'Unknown')
+    status = metrics.get('validator_status', 'UNKNOWN')
+    jailed = metrics.get('jailed', False)
+    tombstoned = metrics.get('tombstoned', False)
+    catching_up = metrics.get('catching_up', True)
+    height = metrics.get('height', 0)
+    missed = metrics.get('missed_blocks', 0)
+    
+    message = f"📊 RAI VALIDATOR — FULL STATUS REPORT\n"
+    message += f"📛 Moniker: {moniker}\n\n"
+    message += "Validator:\n"
+    message += f" • 🔓 Status : {status}\n"
+    jailed_emoji = "🔴" if jailed else "🔒"
+    message += f" • {jailed_emoji} Jailed : {'YES' if jailed else 'No'}\n"
+    tombstoned_emoji = "⚰️" if tombstoned else "✅"
+    message += f" • {tombstoned_emoji} Tombstoned : {'YES' if tombstoned else 'No'}\n\n"
+    message += "Node:\n"
+    if catching_up:
+        sync_emoji = "⏳"
+        sync_text = "Catching Up"
+    else:
+        sync_emoji = "✅"
+        sync_text = "OK"
+    message += f" • {sync_emoji} Sync   : {sync_text}\n"
+    message += f" • 📊 Height : {height:,}\n"
+    message += f" • ⚠️  Missed : {missed} blocks\n\n"
+    message += "Balance:\n"
+    message += f" • 💰 Wallet    : {format_balance(metrics.get('wallet_balance', 0))} RAI\n"
+    message += f" • 🔐 Delegated : {format_balance(metrics.get('delegated_balance', 0))} RAI\n"
+    message += f" • 🎁 Rewards   : {format_balance(metrics.get('rewards', 0))} RAI\n\n"
+    
+    wib_time = datetime.utcnow() + timedelta(hours=7)
+    message += f"🕒 {wib_time.strftime('%Y-%m-%d %H:%M')} WIB"
+    
+    return message
+
+
 def format_fatal_message(metrics: Dict[str, Any]) -> str:
     """Format FATAL status message"""
     moniker = metrics.get('moniker', 'Unknown')
@@ -799,17 +838,13 @@ def main():
     # Determine alert level
     level, should_alert = determine_alert_level(metrics, state)
     
-    # Check heartbeat
+    # Check heartbeat (untuk full info report)
     should_heartbeat = should_send_heartbeat(state)
     
-    # Send message if needed
-    if force_send or should_alert or (level == 'HEALTHY' and should_heartbeat):
+    # Send alert/warning/fatal immediately if needed
+    if force_send or should_alert:
         message = format_status_message(metrics, level)
         send_telegram_message(message)
-        
-        # Update heartbeat time
-        if level == 'HEALTHY' and should_heartbeat:
-            state['last_heartbeat'] = time.time()
         
         # Send charts if requested or alert/fatal
         if send_charts or level in ['ALERT', 'FATAL']:
@@ -818,6 +853,12 @@ def main():
                 send_telegram_photo(REWARDS_CHART, "Rewards History (24h)")
             if MISSED_BLOCKS_CHART.exists():
                 send_telegram_photo(MISSED_BLOCKS_CHART, "Missed Blocks Delta (24h)")
+    
+    # Send full info report every HEARTBEAT_HOURS (terlepas dari status)
+    if should_heartbeat:
+        full_info_message = format_full_info_message(metrics)
+        send_telegram_message(full_info_message)
+        state['last_heartbeat'] = time.time()
     
     # Update state
     state['last_missed_blocks'] = metrics.get('missed_blocks', 0)
