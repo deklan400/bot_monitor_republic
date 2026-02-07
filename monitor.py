@@ -610,37 +610,37 @@ def format_status_message(metrics: Dict[str, Any], status: str) -> str:
     message = f"{config['emoji']} {config['title']} {config['icon']}\n\n"
     
     message += "📊 Validator:\n"
-    message += f"• Status  : {val_status_emoji} {val_status_display}\n"
+    message += f"• {val_status_emoji} Status  : {val_status_display}\n"
     
     jailed = metrics.get('jailed', False)
     jailed_emoji = '🔒' if jailed else '🔓'
-    message += f"• Jailed  : {jailed_emoji} {'Yes' if jailed else 'No'}\n"
+    message += f"• {jailed_emoji} Jailed  : {'Yes' if jailed else 'No'}\n"
     
     if metrics.get('tombstoned'):
-        message += f"• Tombstoned : 💀 Yes\n"
+        message += f"• 💀 Tombstoned : Yes\n"
     
     message += "\n🖥️ Node:\n"
     sync_status = "SYNCING" if metrics.get('node_sync', True) else "OK"
     sync_emoji = '🔄' if metrics.get('node_sync', True) else '✅'
-    message += f"• Sync    : {sync_emoji} {sync_status}\n"
+    message += f"• {sync_emoji} Sync    : {sync_status}\n"
     
     height = metrics.get('height', 0)
-    message += f"• Height  : 📈 {height:,}\n"
+    message += f"• 📈 Height  : {height:,}\n"
     
     missed = metrics.get('missed_blocks', 0)
     missed_emoji = '⚠️' if missed > 0 else '✅'
-    message += f"• Missed  : {missed_emoji} {missed}\n"
+    message += f"• {missed_emoji} Missed  : {missed}\n"
     
     message += "\n💰 Balance:\n"
     wallet_bal = format_balance(metrics.get('wallet_balance', 0))
-    message += f"• Wallet    : 💵 {wallet_bal} RAI\n"
+    message += f"• 💵 Wallet    : {wallet_bal} RAI\n"
     
     delegated_bal = format_balance(metrics.get('delegated_balance', 0))
-    message += f"• Delegated : 🔐 {delegated_bal} RAI\n"
+    message += f"• 🔐 Delegated : {delegated_bal} RAI\n"
     
     rewards_bal = format_balance(metrics.get('rewards', 0))
     rewards_emoji = '🎁' if float(rewards_bal) > 0 else '💤'
-    message += f"• Rewards   : {rewards_emoji} {rewards_bal} RAI\n"
+    message += f"• {rewards_emoji} Rewards   : {rewards_bal} RAI\n"
     
     message += f"\n⏱️ {timestamp}"
     
