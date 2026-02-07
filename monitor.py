@@ -845,9 +845,10 @@ def main():
     # Check heartbeat (untuk full info report)
     should_heartbeat = should_send_heartbeat(state)
     
-    # Send alert/warning/fatal ONLY jika status berubah (atau force_send)
-    # Full info report adalah alert utama, jadi status alert hanya saat perubahan
-    if force_send or (should_alert and status_changed):
+    # Send alert status HANYA untuk ALERT dan FATAL (kritikal)
+    # WARNING tidak perlu alert terpisah, cukup di full info report
+    # Full info report adalah alert utama setiap 3 jam
+    if force_send or (level in ['ALERT', 'FATAL'] and status_changed):
         message = format_status_message(metrics, level)
         send_telegram_message(message)
         
@@ -861,6 +862,7 @@ def main():
     
     # Send full info report every HEARTBEAT_HOURS (terlepas dari status)
     # Ini adalah alert utama yang selalu dikirim setiap 3 jam
+    # Berisi semua info termasuk WARNING jika ada
     if should_heartbeat:
         full_info_message = format_full_info_message(metrics)
         send_telegram_message(full_info_message)
